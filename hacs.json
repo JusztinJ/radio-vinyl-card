@@ -1,0 +1,6 @@
+{
+  "name": "Radio Vinyl Card",
+  "filename": "radio-vinyl-card.js",
+  "render_readme": true,
+  "homeassistant": "2024.8.0"
+}

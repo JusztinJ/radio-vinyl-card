@@ -1,8 +1,10 @@
 name: Release
 
-# Push a tag like v1.0.1 and this creates the GitHub release with the card attached,
-# which is what HACS uses for versions and updates.
+# Publish a release (or push a tag like v1.0.1) and this attaches radio-vinyl-card.js
+# to it, which is what HACS uses for versions and updates.
 on:
+  release:
+    types: [published]
   push:
     tags:
       - "v*"
@@ -12,7 +14,7 @@ permissions:
 
 jobs:
   release:
-    name: Create release
+    name: Attach card to release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +22,12 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           grep -q "CARD_VERSION = \"$TAG\"" radio-vinyl-card.js || { echo "::error::CARD_VERSION in radio-vinyl-card.js is not $TAG"; exit 1; }
-      - name: Create release
+      - name: Create release or attach file
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" radio-vinyl-card.js \
-            --title "$GITHUB_REF_NAME" --generate-notes
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" radio-vinyl-card.js --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" radio-vinyl-card.js --title "$GITHUB_REF_NAME" --generate-notes
+          fi

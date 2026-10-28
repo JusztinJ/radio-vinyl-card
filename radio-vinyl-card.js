@@ -1,7 +1,8 @@
 /* radio-vinyl-card — Radio Browser player with a spinning-vinyl logo and live song info.
    Logos are shown straight from the station's own URL: nothing is downloaded or stored.
    https://github.com/JusztinJ/radio-vinyl-card  ·  MIT licence */
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.0.1";
+const RADIO_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 6H8.3l8.26-3.34L15.88 1 3.24 6.15C2.51 6.43 2 7.17 2 8v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8c0-1.11-.89-2-2-2m0 2v3h-2V9h-2v2H4V8h16M7 20a3 3 0 1 1 0-6 3 3 0 0 1 0 6"/></svg>`;
 console.info(`%c RADIO-VINYL-CARD %c v${CARD_VERSION} `, "color:#fff;background:#222;font-weight:700", "color:#222;background:#f4f1ea");
 const LS_STATION = "radio_vinyl_station";
 const RB_HOSTS = [
@@ -77,6 +78,11 @@ class RadioVinylCard extends HTMLElement {
   .label.has-img img { display:block; }
   .label.has-img .ini { display:none; }
   .ini { font: 800 clamp(18px, 6vw, 34px)/1 system-ui, sans-serif; color:#2a2a2a; letter-spacing:-.02em; }
+  .label.empty { background: radial-gradient(circle at 50% 50%, #ff7a45 0 58%, #e8543a 59% 100%); }
+  .label.empty .ini { color:#fff; display:grid; place-items:center; width:46%; }
+  .ini svg { width:100%; height:auto; display:block; }
+  .is-preview .record { animation-play-state: running; }
+  .is-preview .arm { transform: rotate(4deg); }
   .hole { position:absolute; left:50%; top:50%; width:4%; height:4%; transform:translate(-50%,-50%);
     border-radius:50%; background:#d9d9d9; box-shadow:0 0 0 2px #555; }
   .shine { position:absolute; inset:2%; border-radius:50%; pointer-events:none;
@@ -182,6 +188,23 @@ class RadioVinylCard extends HTMLElement {
 
   disconnectedCallback() { this._stopMeta(); }
 
+  // In the "Add card" picker, spin the record so the card is easy to recognise.
+  set preview(v) { this._previewFlag = !!v; this._applyPreview(); }
+  connectedCallback() { this._applyPreview(); }
+  _inPicker() {
+    let node = this;
+    for (let i = 0; i < 15 && node; i++) {
+      const root = node.getRootNode && node.getRootNode();
+      node = root && root.host;
+      if (node && /CARD-PICKER/i.test(node.tagName)) return true;
+    }
+    return false;
+  }
+  _applyPreview() {
+    if (!this.$) return;
+    this.$.card.classList.toggle("is-preview", !this._station && (!!this._previewFlag || this._inPicker()));
+  }
+
   async _loadStation(uuid) {
     this._stopMeta();
     if (!uuid) { this._station = null; this._render(); return; }
@@ -198,10 +221,12 @@ class RadioVinylCard extends HTMLElement {
     const s = this._station;
     this.$.label.classList.remove("has-img");
     this.$.img.removeAttribute("src");
+    this.$.label.classList.toggle("empty", !s);
+    this._applyPreview();
     if (!s) {
-      this.$.station.textContent = "No station chosen";
-      this.$.ini.textContent = "♪";
-      this._setSong(null, "Tap ♫ to choose a station");
+      this.$.station.textContent = "Radio Vinyl";
+      this.$.ini.innerHTML = RADIO_SVG;
+      this._setSong(null, "Choose a station");
       return;
     }
     this.$.station.textContent = [s.name, s.country].filter(Boolean).join(" · ");

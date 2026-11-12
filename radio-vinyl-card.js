@@ -1,7 +1,7 @@
 /* radio-vinyl-card — Radio Browser player with a spinning-vinyl logo and live song info.
    Logos are shown straight from the station's own URL: nothing is downloaded or stored.
    https://github.com/JusztinJ/radio-vinyl-card  ·  MIT licence */
-const CARD_VERSION = "1.0.1";
+const CARD_VERSION = "1.1.0";
 const RADIO_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 6H8.3l8.26-3.34L15.88 1 3.24 6.15C2.51 6.43 2 7.17 2 8v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8c0-1.11-.89-2-2-2m0 2v3h-2V9h-2v2H4V8h16M7 20a3 3 0 1 1 0-6 3 3 0 0 1 0 6"/></svg>`;
 console.info(`%c RADIO-VINYL-CARD %c v${CARD_VERSION} `, "color:#fff;background:#222;font-weight:700", "color:#222;background:#f4f1ea");
 const LS_STATION = "radio_vinyl_station";
@@ -177,9 +177,17 @@ class RadioVinylCard extends HTMLElement {
     this.$.vol.addEventListener("input", () => { this.$.audio.volume = this.$.vol.value / 100; lsSet("radio_vinyl_volume", this.$.vol.value); });
 
     const a = this.$.audio;
-    a.addEventListener("playing", () => this._setPlaying(true));
-    a.addEventListener("pause", () => this._setPlaying(false));
-    a.addEventListener("error", () => { if (this._wantPlay) { this._msg("This station can't be played right now."); this._setPlaying(false); } });
+    a.addEventListener("playing", () => { this._setPlaying(true); this._onRecovered(); });
+    a.addEventListener("pause", () => { if (!this._reconnecting) this._setPlaying(false); });
+    a.addEventListener("timeupdate", () => { this._lastProgress = Date.now(); });
+    // Auto-reconnect: a live stream that errors, ends or stalls is restarted while the user still wants it playing.
+    a.addEventListener("error", () => {
+      if (!this._wantPlay) return;
+      if (this._hadPlayed) { this._reconnect("error"); return; }
+      this._msg("This station can't be played right now."); this._setPlaying(false);
+    });
+    a.addEventListener("ended", () => { if (this._wantPlay && this._hadPlayed) this._reconnect("ended"); });
+    window.addEventListener("online", () => { if (this._wantPlay && this._hadPlayed && this._isStuck(2000)) this._reconnect("online"); });
 
     this._ro = new ResizeObserver(() => { this._marquee(this.$.title, this._songTitle); this._marquee(this.$.artist, this._songArtist); });
     this._ro.observe(this.$.card);
@@ -242,21 +250,28 @@ class RadioVinylCard extends HTMLElement {
     if (this._playing || this._wantPlay) { this._stop(); } else { this._wantPlay = true; this._start(); }
   }
 
-  async _start() {
+  async _start(isRetry = false) {
     const url = this._streamUrl(); if (!url) return;
-    this._msg("");
+    if (!isRetry) { this._msg(""); this._hadPlayed = false; this._clearReconnect(); }
     this._destroyHls();
     const a = this.$.audio;
     const isHls = /\.m3u8(\?|$)/i.test(url) || this._station.hls === 1;
+    const startedFor = this._uuid;
     try {
       if (isHls && !a.canPlayType("application/vnd.apple.mpegurl")) {
         const mod = await import("https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.mjs");
         const Hls = mod.default;
         this._hls = new Hls(); this._hls.loadSource(url); this._hls.attachMedia(a);
+        this._hls.on(Hls.Events.ERROR, (_e, d) => { if (d && d.fatal && this._wantPlay && this._hadPlayed) this._reconnect("hls"); });
       } else { a.src = url; }
       await a.play();
-      this._startMeta();
+      if (!this._wantPlay || startedFor !== this._uuid) return; // stopped or station changed meanwhile
+      this._hadPlayed = true; this._lastProgress = Date.now();
+      this._startWatchdog();
+      if (!isRetry) this._startMeta(); // the song-info loop keeps running through reconnects
     } catch (e) {
+      if (!this._wantPlay) return;
+      if (isRetry) { this._scheduleRetry(); return; } // keep trying with back-off
       this._wantPlay = false; this._setPlaying(false);
       this._msg("This station can't be played right now.");
     }
@@ -264,10 +279,63 @@ class RadioVinylCard extends HTMLElement {
 
   _stop() {
     this._wantPlay = false;
+    this._clearReconnect(); this._stopWatchdog();
     const a = this.$.audio;
     a.pause(); this._destroyHls(); a.removeAttribute("src"); a.load();
     this._stopMeta(); this._setPlaying(false);
     this._setSong(null, this._station && this._station.name);
+  }
+
+  /* ---------- auto-reconnect ---------- */
+  // Every 2 s: if the stream should be playing but hasn't moved forward for 8 s, restart it.
+  _startWatchdog() {
+    this._stopWatchdog();
+    this._watchdog = setInterval(() => {
+      if (!this._wantPlay) return;
+      if (this._reconnecting) { // an attempt that connected but never started playing counts as failed
+        if (!this._retryTimer && Date.now() - this._attemptAt > 10000) this._scheduleRetry();
+        return;
+      }
+      const a = this.$.audio;
+      if (a.paused && !a.error) return; // paused on purpose (e.g. lock screen) – leave it
+      if (this._isStuck(8000)) this._reconnect("stalled");
+    }, 2000);
+  }
+  _stopWatchdog() { if (this._watchdog) { clearInterval(this._watchdog); this._watchdog = null; } }
+  _isStuck(ms) { return Date.now() - (this._lastProgress || 0) > ms; }
+
+  _reconnect(reason) {
+    if (!this._wantPlay || this._reconnecting) return;
+    this._reconnecting = true; this._retryCount = 0; this._retryStarted = Date.now();
+    console.info(`radio-vinyl-card: stream ${reason}, reconnecting`);
+    this._msg("Reconnecting…");
+    this._retryNow();
+  }
+  _retryNow() {
+    this._retryTimer = null; this._attemptAt = Date.now();
+    if (!this._wantPlay) { this._clearReconnect(); return; }
+    const a = this.$.audio;
+    try { a.pause(); a.removeAttribute("src"); a.load(); } catch (e) {}
+    this._start(true);
+  }
+  _scheduleRetry() {
+    if (!this._wantPlay || this._retryTimer) return;
+    if (Date.now() - this._retryStarted > 10 * 60 * 1000) { // give up after 10 minutes
+      this._clearReconnect(); this._stop();
+      this._msg("Lost the stream – tap play to try again.");
+      return;
+    }
+    const delays = [1, 2, 4, 8, 15, 30];
+    const d = delays[Math.min(this._retryCount++, delays.length - 1)];
+    this._retryTimer = setTimeout(() => this._retryNow(), d * 1000);
+  }
+  _onRecovered() {
+    this._lastProgress = Date.now();
+    if (this._reconnecting) { this._clearReconnect(); this._msg(""); }
+  }
+  _clearReconnect() {
+    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
+    this._reconnecting = false;
   }
   _destroyHls() { if (this._hls) { try { this._hls.destroy(); } catch (e) {} this._hls = null; } }
 

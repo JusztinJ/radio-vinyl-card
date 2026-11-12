@@ -15,6 +15,7 @@ A Home Assistant dashboard card that plays internet radio from [Radio Browser](h
 - Optional `input_text` helper so every device shares the same station
 - Visual editor in the dashboard card picker
 - HLS streams supported (loads hls.js on demand)
+- Auto-reconnect: if the stream drops, errors or freezes for 8 seconds, the card quietly restarts it (retrying with increasing gaps for up to 10 minutes); pressing pause still stops it
 
 ## Requirements
 
